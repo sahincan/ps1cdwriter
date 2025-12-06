@@ -8,7 +8,9 @@ Features:
 - CUE file selection.
 - Burn button that writes with:
     cdrdao write --device <dev> --driver generic-mmc --speed 4 --eject <cue>
+- Automatically sets working directory to CUE folder to find .bin files.
 - Log area that shows all cdrdao output (stdout + stderr) with timestamps.
+- Dark-themed UI for better readability.
 """
 
 import sys
@@ -36,18 +38,16 @@ class MainWindow(QMainWindow):
 
         self.process = QProcess(self)
         self.drive_ready = False
+        self.current_operation = "idle"  # "idle", "test", "burn", "scanbus"
 
-        # Possible values: "idle", "test", "burn", "scanbus"
-        self.current_operation = "idle"
-
-        self.device_edit: QLineEdit | None = None
-        self.cue_path_edit: QLineEdit | None = None
-        self.test_drive_button: QPushButton | None = None
-        self.auto_detect_button: QPushButton | None = None
-        self.select_cue_button: QPushButton | None = None
-        self.burn_button: QPushButton | None = None
-        self.disc_status_label: QLabel | None = None
-        self.log_view: QTextEdit | None = None
+        self.device_edit = None
+        self.cue_path_edit = None
+        self.test_drive_button = None
+        self.auto_detect_button = None
+        self.select_cue_button = None
+        self.burn_button = None
+        self.disc_status_label = None
+        self.log_view = None
 
         self._setup_ui()
         self._setup_process_signals()
@@ -55,377 +55,257 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------
     # UI setup
     # -------------------------------------------------------
-    def _setup_ui(self) -> None:
+    def _setup_ui(self):
         central = QWidget(self)
         self.setCentralWidget(central)
-
         main_layout = QVBoxLayout(central)
 
-        # --- Drive section ---
+        # -------- Drive Section --------
         drive_layout = QHBoxLayout()
-        drive_label = QLabel("CD Device:", self)
-        self.device_edit = QLineEdit(self)
-        self.device_edit.setText("/dev/sr0")  # Common default CD/DVD device on Linux
+        drive_label = QLabel("CD Device:")
+        self.device_edit = QLineEdit()
+        self.device_edit.setText("/dev/sr0")
 
-        self.test_drive_button = QPushButton("Test Drive", self)
-        self.auto_detect_button = QPushButton("Auto-detect Drive", self)
+        self.test_drive_button = QPushButton("Test Drive")
+        self.auto_detect_button = QPushButton("Auto-detect Drive")
 
         drive_layout.addWidget(drive_label)
         drive_layout.addWidget(self.device_edit)
         drive_layout.addWidget(self.test_drive_button)
         drive_layout.addWidget(self.auto_detect_button)
 
-        # --- CUE selection section ---
+        # -------- CUE Selection --------
         cue_layout = QHBoxLayout()
-        cue_label = QLabel("CUE File:", self)
-        self.cue_path_edit = QLineEdit(self)
+        cue_label = QLabel("CUE File:")
+        self.cue_path_edit = QLineEdit()
         self.cue_path_edit.setReadOnly(True)
 
-        self.select_cue_button = QPushButton("Select CUE File", self)
+        self.select_cue_button = QPushButton("Select CUE File")
 
         cue_layout.addWidget(cue_label)
         cue_layout.addWidget(self.cue_path_edit)
         cue_layout.addWidget(self.select_cue_button)
 
-        # --- Disc status + burn button ---
+        # -------- Burn Section --------
         status_layout = QHBoxLayout()
-        self.disc_status_label = QLabel("Disc status: Unknown", self)
-        self.burn_button = QPushButton("Burn", self)
+        self.disc_status_label = QLabel("Disc status: Unknown")
+        self.burn_button = QPushButton("Burn")
 
         status_layout.addWidget(self.disc_status_label)
-        status_layout.addStretch(1)
+        status_layout.addStretch()
         status_layout.addWidget(self.burn_button)
 
-        # --- Log view ---
-        log_label = QLabel("Log:", self)
-        self.log_view = QTextEdit(self)
+        # -------- Log Output --------
+        log_label = QLabel("Log:")
+        self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
 
-        # Put everything in main layout
+        # Add Layouts
         main_layout.addLayout(drive_layout)
         main_layout.addLayout(cue_layout)
         main_layout.addLayout(status_layout)
         main_layout.addWidget(log_label)
         main_layout.addWidget(self.log_view)
 
-        # Window settings
+        # Window
         self.setWindowTitle("PS1 CUE Burner")
         self.resize(900, 520)
 
-        # Connect UI signals
+        # Simple Dark Theme
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #2b2b2b;
+            }
+            QWidget {
+                background-color: #2b2b2b;
+                color: #f0f0f0;
+            }
+            QLineEdit, QTextEdit {
+                background-color: #3b3b3b;
+                color: #f0f0f0;
+                border: 1px solid #555;
+            }
+            QLabel {
+                color: #dcdcdc;
+            }
+            QPushButton {
+                background-color: #444;
+                color: #f0f0f0;
+                border: 1px solid #666;
+                padding: 4px;
+            }
+            QPushButton:hover {
+                background-color: #555;
+            }
+            QPushButton:disabled {
+                background-color: #333;
+                color: #777;
+                border: 1px solid #444;
+            }
+        """)
+
+        # Connect Signals
         self.test_drive_button.clicked.connect(self.on_test_drive_clicked)
         self.auto_detect_button.clicked.connect(self.on_auto_detect_clicked)
         self.select_cue_button.clicked.connect(self.on_select_cue_clicked)
         self.burn_button.clicked.connect(self.on_burn_clicked)
 
-        # Disable burn at startup until drive + cue file are ready
         self._set_burn_controls_enabled(False)
 
-    def _setup_process_signals(self) -> None:
+    # -------------------------------------------------------
+    # Process Signals
+    # -------------------------------------------------------
+    def _setup_process_signals(self):
         self.process.readyReadStandardOutput.connect(self.on_process_stdout)
         self.process.readyReadStandardError.connect(self.on_process_stderr)
         self.process.finished.connect(self.on_process_finished)
         self.process.errorOccurred.connect(self.on_process_error)
 
     # -------------------------------------------------------
-    # Helper methods
+    # Helpers
     # -------------------------------------------------------
-    def _append_log(self, text: str) -> None:
-        """Append a timestamped line to the log view."""
-        if not self.log_view:
-            return
+    def _append_log(self, text):
         timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm:ss")
         self.log_view.append(f"[{timestamp}] {text}")
 
-    def _set_burn_controls_enabled(self, enabled: bool) -> None:
+    def _set_burn_controls_enabled(self, enabled):
         if self.burn_button:
             self.burn_button.setEnabled(enabled)
 
-    def _is_cue_file_valid(self) -> bool:
-        """Check that a .cue file exists and has the correct extension."""
-        if not self.cue_path_edit:
-            return False
+    def _is_cue_file_valid(self):
+        path = self.cue_path_edit.text().strip()
+        return Path(path).is_file() and path.lower().endswith(".cue")
 
-        path_str = self.cue_path_edit.text().strip()
-        if not path_str:
-            return False
-
-        path = Path(path_str)
-        return path.is_file() and path.suffix.lower() == ".cue"
-
-    def _process_is_running(self) -> bool:
+    def _process_is_running(self):
         return self.process.state() != QProcess.ProcessState.NotRunning
 
     # -------------------------------------------------------
-    # UI slots
+    # UI Slots
     # -------------------------------------------------------
-    def on_test_drive_clicked(self) -> None:
+    def on_test_drive_clicked(self):
         if self._process_is_running():
-            QMessageBox.warning(
-                self,
-                "Process Running",
-                "Another operation is currently running. Please wait.",
-            )
-            return
-
-        if not self.device_edit:
             return
 
         device = self.device_edit.text().strip()
         if not device:
-            QMessageBox.warning(
-                self,
-                "Invalid Device",
-                "Please enter a valid CD device path, e.g. /dev/sr0.",
-            )
+            QMessageBox.warning(self, "Invalid Device", "Enter a valid device path.")
             return
 
-        self._append_log(f"Testing drive using device: {device}")
-
-        # cdrdao disk-info --device <device>
-        program = "cdrdao"
-        args = ["disk-info", "--device", device]
-
+        self._append_log(f"Testing drive: {device}")
         self.current_operation = "test"
-        self.process.setProgram(program)
-        self.process.setArguments(args)
+        self.process.setProgram("cdrdao")
+        self.process.setArguments(["disk-info", "--device", device])
         self.process.start()
-
-        if not self.process.waitForStarted(1000):
-            self._append_log("Failed to start cdrdao. Is it installed?")
-            QMessageBox.critical(
-                self,
-                "Error",
-                "Failed to start cdrdao. Make sure it is installed and you have permissions.",
-            )
-            self.current_operation = "idle"
-            return
 
         self.drive_ready = False
-        if self.disc_status_label:
-            self.disc_status_label.setText("Disc status: Testing...")
+        self.disc_status_label.setText("Disc status: Testing...")
         self._set_burn_controls_enabled(False)
 
-    def on_auto_detect_clicked(self) -> None:
-        """Run 'cdrdao scanbus' and try to auto-detect a CD device."""
+    def on_auto_detect_clicked(self):
         if self._process_is_running():
-            QMessageBox.warning(
-                self,
-                "Process Running",
-                "Another operation is currently running. Please wait.",
-            )
             return
 
-        self._append_log("Running 'cdrdao scanbus' for drive detection...")
-
-        program = "cdrdao"
-        args = ["scanbus"]
-
+        self._append_log("Running auto-detect (cdrdao scanbus)...")
         self.current_operation = "scanbus"
-        self.process.setProgram(program)
-        self.process.setArguments(args)
+        self.process.setProgram("cdrdao")
+        self.process.setArguments(["scanbus"])
         self.process.start()
 
-        if not self.process.waitForStarted(1000):
-            self._append_log("Failed to start 'cdrdao scanbus'.")
-            QMessageBox.critical(
-                self,
-                "Error",
-                "Failed to start 'cdrdao scanbus'. Check installation and permissions.",
-            )
-            self.current_operation = "idle"
-            return
-
-    def on_select_cue_clicked(self) -> None:
+    def on_select_cue_clicked(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select PS1 CUE File",
             "",
             "CUE Files (*.cue);;All Files (*)",
         )
-
-        if file_path and self.cue_path_edit:
+        if file_path:
             self.cue_path_edit.setText(file_path)
-            self._append_log(f"Selected CUE file: {file_path}")
-
-            # Enable burn if drive is ready and CUE file is valid
+            self._append_log(f"Selected CUE: {file_path}")
             self._set_burn_controls_enabled(self.drive_ready and self._is_cue_file_valid())
-        else:
-            # User cancelled or no file selected
-            self._set_burn_controls_enabled(False)
 
-    def on_burn_clicked(self) -> None:
+    def on_burn_clicked(self):
         if self._process_is_running():
-            QMessageBox.warning(
-                self,
-                "Process Running",
-                "Another operation is currently running. Please wait.",
-            )
             return
 
         if not self.drive_ready:
-            QMessageBox.warning(
-                self,
-                "Drive Not Ready",
-                "Please test the drive first.",
-            )
+            QMessageBox.warning(self, "Drive Not Ready", "Run Test Drive first.")
             return
 
         if not self._is_cue_file_valid():
-            QMessageBox.warning(
-                self,
-                "Invalid CUE",
-                "Please select a valid .cue file.",
-            )
-            return
-
-        if not (self.device_edit and self.cue_path_edit):
+            QMessageBox.warning(self, "Invalid CUE", "Select a valid .cue file.")
             return
 
         device = self.device_edit.text().strip()
         cue_path = self.cue_path_edit.text().strip()
 
-        # IMPORTANT:
-        # Set working directory to CUE folder so relative FILE entries can be resolved.
+        # Set working directory so CUE finds .bin file
         cue_dir = str(Path(cue_path).parent)
         self.process.setWorkingDirectory(cue_dir)
 
-        self._append_log(
-            f"Starting burn process with settings:"
-            f" device={device}, driver=generic-mmc, speed=4, eject=yes"
-        )
-
-        # This matches your terminal command:
-        #   cdrdao write --device /dev/sr0 --driver generic-mmc --speed 4 <CUE>
-        program = "cdrdao"
-        args = [
-            "write",
-            "--device",
-            device,
-            "--driver",
-            "generic-mmc",
-            "--speed",
-            "4",
-            "--eject",
-            cue_path,
-        ]
+        self._append_log("Starting burn process...")
+        self._append_log(f"Device={device}, Driver=generic-mmc, Speed=4")
 
         self.current_operation = "burn"
-        self.process.setProgram(program)
-        self.process.setArguments(args)
+        self.process.setProgram("cdrdao")
+        self.process.setArguments([
+            "write", "--device", device, "--driver", "generic-mmc",
+            "--speed", "4", "--eject", cue_path
+        ])
         self.process.start()
 
-        if not self.process.waitForStarted(1000):
-            self._append_log("Failed to start burn process.")
-            QMessageBox.critical(
-                self,
-                "Error",
-                "Failed to start cdrdao. Check installation and permissions.",
-            )
-            self.current_operation = "idle"
-            return
-
-        if self.disc_status_label:
-            self.disc_status_label.setText("Disc status: Burning...")
+        self.disc_status_label.setText("Disc status: Burning...")
         self._set_burn_controls_enabled(False)
 
     # -------------------------------------------------------
-    # QProcess handlers
+    # Process Output
     # -------------------------------------------------------
-    def on_process_stdout(self) -> None:
-        data = self.process.readAllStandardOutput()
-        text = bytes(data).decode(errors="ignore").strip()
+    def on_process_stdout(self):
+        text = bytes(self.process.readAllStandardOutput()).decode().strip()
         if text:
             for line in text.splitlines():
                 self._append_log(line)
 
-    def on_process_stderr(self) -> None:
-        data = self.process.readAllStandardError()
-        text = bytes(data).decode(errors="ignore").strip()
+    def on_process_stderr(self):
+        text = bytes(self.process.readAllStandardError()).decode().strip()
         if text:
             for line in text.splitlines():
                 self._append_log(line)
 
-    def on_process_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
-        self._append_log(
-            f"Process finished (operation={self.current_operation}) "
-            f"with exit code {exit_code}"
-        )
-
+    def on_process_finished(self, exit_code, _):
         op = self.current_operation
+        self._append_log(f"Process finished (op={op}, code={exit_code})")
 
         if op == "test":
             if exit_code == 0:
                 self.drive_ready = True
-                if self.disc_status_label:
-                    self.disc_status_label.setText("Disc status: Ready")
-                self._append_log("Drive test successful. Disc appears to be readable.")
+                self.disc_status_label.setText("Disc status: Ready")
             else:
-                self.drive_ready = False
-                if self.disc_status_label:
-                    self.disc_status_label.setText("Disc status: Drive test failed")
-                self._append_log("Drive test failed. Check disc and device path.")
+                self.disc_status_label.setText("Disc status: Drive test failed")
 
         elif op == "burn":
             if exit_code == 0:
-                if self.disc_status_label:
-                    self.disc_status_label.setText("Disc status: Burn completed")
-                self._append_log("Burn completed successfully.")
+                self.disc_status_label.setText("Disc status: Burn completed")
             else:
-                if self.disc_status_label:
-                    self.disc_status_label.setText("Disc status: Burn failed")
-                self._append_log("Burn failed. Please check the log output above.")
+                self.disc_status_label.setText("Disc status: Burn failed")
 
         elif op == "scanbus":
-            if exit_code == 0:
-                self._append_log("'cdrdao scanbus' completed successfully.")
-                # Try simple auto-select of common device paths
-                for candidate in ("/dev/sr0", "/dev/cdrom", "/dev/dvd"):
-                    if Path(candidate).exists():
-                        if self.device_edit:
-                            self.device_edit.setText(candidate)
-                        self._append_log(f"Auto-selected device: {candidate}")
-                        break
-                else:
-                    self._append_log(
-                        "No common device path (/dev/sr0, /dev/cdrom, /dev/dvd) found. "
-                        "Please set the CD device manually."
-                    )
-            else:
-                self._append_log("'cdrdao scanbus' failed. Check the log output.")
+            for candidate in ("/dev/sr0", "/dev/cdrom", "/dev/dvd"):
+                if Path(candidate).exists():
+                    self.device_edit.setText(candidate)
+                    self._append_log(f"Auto-selected drive: {candidate}")
+                    break
 
-        # After any operation, update burn button state
         self._set_burn_controls_enabled(self.drive_ready and self._is_cue_file_valid())
-
-        # Back to idle
         self.current_operation = "idle"
 
-    def on_process_error(self, error: QProcess.ProcessError) -> None:
-        if error == QProcess.ProcessError.FailedToStart:
-            msg = "Process error: Failed to start. Is cdrdao installed and in PATH?"
-        elif error == QProcess.ProcessError.Crashed:
-            msg = "Process error: cdrdao crashed."
-        elif error == QProcess.ProcessError.Timedout:
-            msg = "Process error: Timed out."
-        elif error == QProcess.ProcessError.WriteError:
-            msg = "Process error: Write error."
-        elif error == QProcess.ProcessError.ReadError:
-            msg = "Process error: Read error."
-        else:
-            msg = "Process error: Unknown error."
-
-        self._append_log(msg)
-        QMessageBox.critical(self, "Process Error", msg)
-
-        # After an error, we disable burning until drive is tested again
+    def on_process_error(self, error):
+        self._append_log("Process error occurred.")
+        self.disc_status_label.setText("Disc status: Error")
         self.drive_ready = False
-        if self.disc_status_label:
-            self.disc_status_label.setText("Disc status: Error")
         self._set_burn_controls_enabled(False)
-        self.current_operation = "idle"
 
 
-def main() -> None:
+def main():
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
