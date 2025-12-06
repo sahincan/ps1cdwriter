@@ -37,7 +37,6 @@ class MainWindow(QMainWindow):
         self.process = QProcess(self)
         self.drive_ready = False
 
-        # Tracks what the current cdrdao operation is
         # Possible values: "idle", "test", "burn", "scanbus"
         self.current_operation = "idle"
 
@@ -110,7 +109,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.log_view)
 
         # Window settings
-        self.setWindowTitle("PS1 CUE Burner (cdrdao Frontend)")
+        self.setWindowTitle("PS1 CUE Burner")
         self.resize(900, 520)
 
         # Connect UI signals
@@ -286,12 +285,17 @@ class MainWindow(QMainWindow):
         device = self.device_edit.text().strip()
         cue_path = self.cue_path_edit.text().strip()
 
+        # IMPORTANT:
+        # Set working directory to CUE folder so relative FILE entries can be resolved.
+        cue_dir = str(Path(cue_path).parent)
+        self.process.setWorkingDirectory(cue_dir)
+
         self._append_log(
             f"Starting burn process with settings:"
             f" device={device}, driver=generic-mmc, speed=4, eject=yes"
         )
 
-        # This matches your successful terminal command:
+        # This matches your terminal command:
         #   cdrdao write --device /dev/sr0 --driver generic-mmc --speed 4 <CUE>
         program = "cdrdao"
         args = [
